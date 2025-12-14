@@ -1,0 +1,5 @@
+openai==2.11.0
+pandas==2.3.3
+streamlit==1.52.1
+mysql-connector-python==9.5.0
+requests==2.32.5
