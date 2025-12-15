@@ -6,6 +6,7 @@ from datetime import datetime
 import mysql.connector
 import requests
 import PyPDF2  # <--- 新引入的“显微镜”，用于读取 PDF
+import tiktoken # 引入消耗的token计算
 
 # --- 1. 页面基础配置 ---
 st.set_page_config(page_title="Dr. AI 个人助手", page_icon="👨‍⚕️", layout="wide")
@@ -99,6 +100,14 @@ def get_exercise_info(user_input):
     except Exception as e:
         st.error(f"AI Error: {e}")
         return None
+
+def count_tokens(text):
+    """【新增】计算文本的 Token 数量"""
+    # 使用 cl100k_base 编码器 (目前大多数先进模型通用的编码标准)
+    encoding = tiktoken.get_encoding("cl100k_base")
+    num_tokens = len(encoding.encode(text))
+    return num_tokens
+
 # ---4. 数据保存函数---
 def save_to_db(table_name, data_dict):
     try:
@@ -272,13 +281,22 @@ def render_health_hub():
             st.success("🟢 状态良好，继续保持！")
 
 # --- 4. 功能模块 B：文献阅读 (新开发的科室) ---
+# 【优化1】加上缓存装饰器：只要文件没变，就不需要重新解析 PDF
+@st.cache_data
 def extract_text_from_pdf(uploaded_file):
     """助手函数：把 PDF 文件变成字符串"""
+    uploaded_file.seek(0)
     pdf_reader = PyPDF2.PdfReader(uploaded_file)
     text = ""
     # 遍历每一页读取文字
-    for page in pdf_reader.pages:
-        text += page.extract_text()
+    for i, page in enumerate(pdf_reader.pages):
+        page_content = page.extract_text()
+        if page_content:
+            # 【优化2】我们在每一页内容前加上 [第x页] 的标记
+            # 这样 AI 就能知道这段话来自哪里
+            text += f"\n\n--- [第 {i + 1} 页] ---\n\n"
+            text += page_content
+
     return text
 
 def render_med_reader():
@@ -287,16 +305,30 @@ def render_med_reader():
 
     # 1. 上传文件
     uploaded_file = st.file_uploader("请上传 PDF 文件", type="pdf")
-
     if uploaded_file:
-        # 2. 解析文件
+        # 解析文件 (有缓存，第二次会很快)
         with st.spinner("正在读取论文内容..."):
             paper_text = extract_text_from_pdf(uploaded_file)
-            st.success(f"读取成功！共检测到 {len(paper_text)} 个字符")
+            # --- 【新增】计算并显示 Token ---
+            tokens = count_tokens(paper_text)
+            char_count = len(paper_text)
+            # 显示字符数统计
+            st.success("读取成功！")
+            col1, col2 = st.columns(2)
+            col1.metric("字符数 (Characters)", f"{char_count:,}")  # 加逗号，方便看千分位
+            col2.metric("预估 Token (AI 消耗)", f"{tokens:,}", help="DeepSeek 最大支持 64k Context，请注意不要超标")
 
-            # 显示一个折叠框，让用户确认读到了什么
-            with st.expander("点击查看提取的原文内容"):
-                st.text(paper_text[:2000] + "...")  # 只显示前2000字避免刷屏
+            # 警告：如果字数真的超级多（比如超过20万），才需要担心
+            if len(paper_text) > 100000:
+                st.warning("⚠️ 文献非常长，AI 处理可能会稍慢，请耐心等待。")
+            if len(paper_text) > 2000:
+                # 如果文章很长，显示头尾
+                preview_content = paper_text[:1000] + "\n\n... (中间内容已省略) ...\n\n" + paper_text[-1000:]
+            else:
+                # 如果文章本身就不长，直接显示全部
+                preview_content = paper_text
+            with st.expander("点击展开查看文档预览"):
+                st.markdown(preview_content)
 
         st.divider()
 
@@ -306,16 +338,21 @@ def render_med_reader():
         if query:
             # 4. 构建 Prompt (RAG 的核心)
             # 我们把论文内容塞进 prompt，像“开卷考试”一样
-            system_prompt = "你是我的医学科研助手。请基于以下提供的【论文内容】回答用户的【问题】。如果论文中没有提到，请直接说不知道，不要编造。"
+            system_prompt = """
+            你是一个严谨的医学科研助手。
+            1. 请基于我提供的【论文内容】回答问题。
+            2. **必须引用原文**：在回答的关键观点后，请标注出处，例如 (见第 3 页)。
+            3. 如果论文中没有相关信息，请直接回答“文中未提及”，不要编造。
+            4. 保持回答的逻辑性，使用 Markdown 格式（如列表、粗体）。
+            """
 
-            user_prompt = f"【问题】：{query}\n\n【论文内容】：{paper_text[:30000]}"
-            # 注意：DeepSeek 有字数限制，如果论文太长可能需要截断，这里先取前3万字
-
+            user_prompt = f"【问题】：{query}\n\n【论文内容】：{paper_text[:100000]}"
+            # 注意：DeepSeek 有字数限制，如果论文太长可能需要截断，这里先取前10万字
             with st.chat_message("user"):
                 st.write(query)
 
             with st.chat_message("assistant"):
-                with st.spinner("AI 正在研读论文并思考..."):
+                with st.spinner("AI 正在全篇检索并生成带引用的回答..."):
                     try:
                         response = client.chat.completions.create(
                             model="deepseek-chat",
@@ -323,12 +360,28 @@ def render_med_reader():
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": user_prompt},
                             ],
-                            temperature=0.2  # 文献阅读需要严谨，温度调低
+                            temperature=0.2  # 温度越低，幻觉越少，引用越准
                         )
                         answer = response.choices[0].message.content
                         st.markdown(answer)
+                        # 3. 【新增】获取资源消耗“账单”
+                        # API 会返回一个 usage 对象，里面记录了这次对话的详细消耗
+                        if response.usage:
+                            prompt_tokens = response.usage.prompt_tokens  # 提问消耗 (PDF + 问题)
+                            completion_tokens = response.usage.completion_tokens  # 回答消耗 (AI 写的字)
+                            total_tokens = response.usage.total_tokens  # 总消耗
+                            # 4. 【新增】用小字展示在回答下方
+                            st.divider()
+                            st.caption(f"""
+                                                        📊 **本次问答资源统计**：
+                                                        - 📥 阅读 (Input): `{prompt_tokens}` Tokens
+                                                        - 📤 思考 (Output): `{completion_tokens}` Tokens
+                                                        - 💰 总计 (Total): `{total_tokens}` Tokens
+                                                        """)
                     except Exception as e:
-                        st.error(f"API 请求失败: {e}")
+                        st.error(f"❌ 请求出错: {e}")
+                        if "context_length_exceeded" in str(e):
+                            st.warning("文档实在太长了！建议尝试只提取摘要或拆分阅读。")
 
 
 # --- 5. 主程序入口 (总控室) ---
