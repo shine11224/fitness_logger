@@ -376,5 +376,5 @@ def render_med_reader():
                 st.info("👈 请点击左侧列表查看详情")
 # --- 5. 主程序入口 ---
 def main():
-if __name__ == "__main__":
-    main()
+    if __name__ == "__main__":
+        main()
