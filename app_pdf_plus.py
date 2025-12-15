@@ -404,8 +404,8 @@ def render_med_reader():
                             st.caption(f"""
                             💰 **DeepSeek 缓存统计**:
                             - 📥 阅读 (Input): `{prompt_tokens}` Tokens
-                            - ✅ 命中缓存: `{cached_tokens}` Tokens (仅 0.1元/百万)
-                            - 🆕 新增读取: `{miss_tokens}` Tokens (1元/百万)
+                            - ✅ 命中缓存: `{cached_tokens}` Tokens 
+                            - 🆕 新增读取: `{miss_tokens}` Tokens 
                             - 📤 思考 (Output): `{completion_tokens}` Tokens
                             - 💰 总计 (Total): `{total}` Tokens
                             """)
