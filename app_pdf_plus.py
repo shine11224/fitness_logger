@@ -302,8 +302,10 @@ def extract_text_from_pdf(uploaded_file):
 def render_med_reader():
     st.header("📄 AI 文献阅读助手")
     st.caption("上传医学论文(PDF)，让 AI 帮你快速提取核心观点")
-
-    # 1. 上传文件
+    # 1. 添加上下文记忆
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    # 2. 上传文件
     uploaded_file = st.file_uploader("请上传 PDF 文件", type="pdf")
     if uploaded_file:
         # 解析文件 (有缓存，第二次会很快)
@@ -317,7 +319,6 @@ def render_med_reader():
             col1, col2 = st.columns(2)
             col1.metric("字符数 (Characters)", f"{char_count:,}")  # 加逗号，方便看千分位
             col2.metric("预估 Token (AI 消耗)", f"{tokens:,}", help="DeepSeek 最大支持 64k Context，请注意不要超标")
-
             # 警告：如果字数真的超级多（比如超过20万），才需要担心
             if len(paper_text) > 100000:
                 st.warning("⚠️ 文献非常长，AI 处理可能会稍慢，请耐心等待。")
@@ -329,59 +330,88 @@ def render_med_reader():
                 preview_content = paper_text
             with st.expander("点击展开查看文档预览"):
                 st.markdown(preview_content)
+        # 3. 如果换了新文件，清空以前的聊天记录
+        # 我们用文件名来判断用户是否换了论文
+        if "last_file" not in st.session_state or st.session_state.last_file != uploaded_file.name:
+            st.session_state.chat_history = []  # 清空记忆
+            st.session_state.last_file = uploaded_file.name  # 更新文件名记录
+            st.toast("检测到新文件，聊天记录已重置")
+        # 4. 显示历史聊天记录 (回放记忆)
+        # 每次页面刷新，都要把之前的聊天气泡重新画一遍
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-        st.divider()
 
-        # 3. 问答环节
+        # 5. 问答环节
         query = st.chat_input("关于这篇论文，你想问什么？(例如：这篇研究的结论是什么？)")
-
         if query:
-            # 4. 构建 Prompt (RAG 的核心)
-            # 我们把论文内容塞进 prompt，像“开卷考试”一样
-            system_prompt = """
-            你是一个严谨的医学科研助手。
-            1. 请基于我提供的【论文内容】回答问题。
-            2. **必须引用原文**：在回答的关键观点后，请标注出处，例如 (见第 3 页)。
-            3. 如果论文中没有相关信息，请直接回答“文中未提及”，不要编造。
-            4. 保持回答的逻辑性，使用 Markdown 格式（如列表、粗体）。
-            """
-
-            user_prompt = f"【问题】：{query}\n\n【论文内容】：{paper_text[:100000]}"
-            # 注意：DeepSeek 有字数限制，如果论文太长可能需要截断，这里先取前10万字
+            # A. 立刻把用户的问题显示出来，并存入记忆
             with st.chat_message("user"):
                 st.write(query)
+            st.session_state.chat_history.append({"role": "user", "content": query})
 
+            # B. 构造发给 AI 的完整消息列表
+            # 关键点：System Prompt (含论文) + History (旧记录) + Query (新问题)
+
+            # (1) 系统级指令：永远放在第一条，包含论文全文
+            # 💡 DeepSeek 会自动缓存这一条，因为它是固定不变的“前缀”
+            messages_payload = [
+                {
+                    "role": "system",
+                    "content": f"""
+                    你是一个严谨的医学科研助手。
+                    1. 请基于我提供的【论文内容】回答问题。
+                    2. **必须引用原文**：在回答的关键观点后，请标注出处，例如 (见第 3 页)。
+                    3. 如果论文中没有相关信息，请直接回答“文中未提及”，不要编造。
+                    4. 保持回答的逻辑性，使用 Markdown 格式（如列表、粗体）。
+                    【论文全文】：
+                    {paper_text}"""
+                }
+            ]
+
+            # (2) 追加历史记录 (让 AI 知道上下文)
+            # 我们把 session_state 里的记录加进去
+            # *注意：为了省钱，你可以只取最近的 4-6 轮对话，这里演示取全部
+            messages_payload.extend(st.session_state.chat_history)
+
+            # C. 调用 API
             with st.chat_message("assistant"):
-                with st.spinner("AI 正在全篇检索并生成带引用的回答..."):
+                with st.spinner("AI 正在思考..."):
                     try:
                         response = client.chat.completions.create(
                             model="deepseek-chat",
-                            messages=[
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": user_prompt},
-                            ],
-                            temperature=0.2  # 温度越低，幻觉越少，引用越准
+                            messages=messages_payload, # 发送完整对话链
+                            temperature=0.1
                         )
+
                         answer = response.choices[0].message.content
                         st.markdown(answer)
-                        # 3. 【新增】获取资源消耗“账单”
-                        # API 会返回一个 usage 对象，里面记录了这次对话的详细消耗
+
+                        # D. 把 AI 的回答也存入记忆
+                        st.session_state.chat_history.append({"role": "assistant", "content": answer})
+
+                        # E. 费用统计 (看看缓存有没有生效)
                         if response.usage:
                             prompt_tokens = response.usage.prompt_tokens  # 提问消耗 (PDF + 问题)
                             completion_tokens = response.usage.completion_tokens  # 回答消耗 (AI 写的字)
-                            total_tokens = response.usage.total_tokens  # 总消耗
-                            # 4. 【新增】用小字展示在回答下方
-                            st.divider()
+                            # 缓存命中的 Token 数量 (Cache Hit)
+                            cached_tokens = response.usage.prompt_cache_hit_tokens
+                            # 实际扣费的 Token 数量 (Cache Miss)
+                            miss_tokens = response.usage.prompt_cache_miss_tokens
+                            total = response.usage.total_tokens
+
                             st.caption(f"""
-                                                        📊 **本次问答资源统计**：
-                                                        - 📥 阅读 (Input): `{prompt_tokens}` Tokens
-                                                        - 📤 思考 (Output): `{completion_tokens}` Tokens
-                                                        - 💰 总计 (Total): `{total_tokens}` Tokens
-                                                        """)
+                            💰 **DeepSeek 缓存统计**:
+                            - 📥 阅读 (Input): `{prompt_tokens}` Tokens
+                            - ✅ 命中缓存: `{cached_tokens}` Tokens (仅 0.1元/百万)
+                            - 🆕 新增读取: `{miss_tokens}` Tokens (1元/百万)
+                            - 📤 思考 (Output): `{completion_tokens}` Tokens
+                            - 💰 总计 (Total): `{total}` Tokens
+                            """)
+
                     except Exception as e:
-                        st.error(f"❌ 请求出错: {e}")
-                        if "context_length_exceeded" in str(e):
-                            st.warning("文档实在太长了！建议尝试只提取摘要或拆分阅读。")
+                        st.error(f"出错: {e}")
 
 
 # --- 5. 主程序入口 (总控室) ---
