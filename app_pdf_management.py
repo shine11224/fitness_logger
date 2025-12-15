@@ -346,10 +346,11 @@ def render_med_reader():
                     "id": st.column_config.NumberColumn("ID", width="small"),
                     "summary": st.column_config.TextColumn("📌 核心结论", width="large"),
                     "tags": st.column_config.TextColumn("标签", width="medium"),
-                    "paper_name": st.column_config.Column(hidden=True),
-                    "question": st.column_config.Column(hidden=True),
-                    "answer": st.column_config.Column(hidden=True),
-                    "file_path": st.column_config.Column(hidden=True)
+                    # ✅ 修复后的写法：直接设为 None 即可隐藏
+                    "paper_name": None,
+                    "question": None,
+                    "answer": None,
+                    "file_path": None
                 },
                 use_container_width=True, hide_index=True, selection_mode="single-row", on_select="rerun", height=600
             )
