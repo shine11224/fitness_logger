@@ -172,10 +172,17 @@ def render_med_reader():
     with st.sidebar:
         st.markdown("### 📥 文献上传")
         uploaded_file = st.file_uploader("Upload PDF", type="pdf")
-        if uploaded_file:
-            # 自动保存到本地书架
-            saved_path = save_uploaded_file(uploaded_file)
+        if uploaded_file:# 自动保存到本地书架
+            # ✅ 修复点：使用两个变量来接收返回的两个值
+            saved_path, is_new = save_uploaded_file(uploaded_file)
+
+            # 只把路径存入 session
             st.session_state.current_file_path = saved_path
+            if is_new:
+                st.toast("新文件已归档到本地书架")
+            else:
+                st.caption("✅ 文件已存在于本地书架")
+
 
             # 清空旧会话
             if "last_file" not in st.session_state or st.session_state.last_file != uploaded_file.name:
